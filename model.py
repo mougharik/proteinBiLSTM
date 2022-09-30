@@ -1,99 +1,93 @@
 
 import math
 import argparse
+import random
 import tensorflow as tf
+from tensorflow import initializers
 from torch.utils.tensorboard import SummaryWriter
-from util import *
-from tensorflow.keras import layers
+from utils import *
+from keras import Sequential, layers
+from keras import regularizers as reg
 
 
+def buildModel(l2) -> Sequential:
+    '''
+    todo      
+    '''
+    wInit = initializers.RandomNormal(mean=0.0, stddev=0.05, seed=42)
+    bInit = initializers.Constant(1e-1)
+    model = Sequential([
+        layers.Bidirectional(
+                layers.LSTM(
+                    units=64, 
+                    dropout=0.1,
+                    recurrent_dropout=0.1,
+                    activation='elu',
+                    #recurrent_activation='elu',
+                    bias_initializer=bInit,
+                    kernel_initializer=wInit,
+                    kernel_regularizer=l2, 
+                    return_sequences=True), 
+                input_shape=(100,21)),
+            layers.BatchNormalization(),
+            layers.Bidirectional(
+                layers.LSTM(
+                    units=64, 
+                    dropout=0.2,
+                    recurrent_dropout=0.2,
+                    activation='elu',
+                    #recurrent_activation='elu',
+                    bias_initializer=bInit,
+                    kernel_initializer=wInit,
+                    kernel_regularizer=l2, 
+                    return_sequences=True)),
+            layers.Flatten(),
+            layers.Dense(
+                    units=256, 
+                    activation='relu',
+                    kernel_regularizer=l2),
+            #layers.Dropout(0.2),
+            layers.Dense(units=21, activation='softmax'),
+    ])
 
-vocab = [char for char in 'ACDEFGHIKLMNPQRSTVWY'] + ['$']
-one_hot = F.one_hot(torch.arange(0, len(vocab)))
-encode_dict = dict(zip(vocab, one_hot))
-decode_dict = dict(zip([i for i in range(len(vocab))], vocab))
-
-def train(args, model, device, train_loader, optimizer, epoch):
-    model.train()
-    losses = []
-    correct = 0
-    total = 0
-    for batch_idx, (data, target) in enumerate(train_loader):
-        data, target = data.to(device), target.to(device)
-        optimizer.zero_grad()
-        output = model(data)
-        pred = output.max(1)[1]
-        loss = F.nll_loss(output, target)
-        losses.append(loss)
-        loss.backward()
-        optimizer.step()
-        correct += pred.eq(target).sum().item()
-        total += target.size(0)
-        if batch_idx % args.log_interval == 0:
-            print('Train Epoch: {} [{}/{} ({:.0f}%)]\tLoss: {:.6f}'.format(
-                epoch, batch_idx * len(data), len(train_loader.dataset),
-                100. * batch_idx / len(train_loader), loss.item()))
-            if args.dry_run:
-                break
-    
-    acc = 100. * correct / total
-    avg_loss = sum(losses) / len(train_loader)
-
-    print(acc)
-    print(avg_loss)
-    return acc, avg_loss
-
-def test(model, device, test_loader):
-    model.eval()
-    test_loss = 0
-    correct = 0
-    with torch.no_grad():
-        for data, target in test_loader:
-            data, target = data.to(device), target.to(device)
-            output = model(data)
-            test_loss += F.nll_loss(output, target, reduction='sum').item()  # sum up batch loss
-            pred = output.argmax(dim=1, keepdim=True)  # get the index of the max log-probability
-            correct += pred.eq(target.view_as(pred)).sum().item()
-
-    test_loss /= len(test_loader.dataset)
-
-    print('\nTest set: Average loss: {:.4f}, Accuracy: {}/{} ({:.0f}%)\n'.format(
-        test_loss, correct, len(test_loader.dataset),
-        100. * correct / len(test_loader.dataset)))
-
-    return (100. * correct / len(test_loader.dataset)), test_loss
+    return model
 
 
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser(description='BiLSTM for Protein Sequencing')
     parser.add_argument('--train-model', action='store_true', default=False,
                         help='For loading the \'protein_bilstm\' Model')
-    parser.add_argument('--gen', action='store_true', default=True,
-                        help='For loading the \'protein_bilstm\' Model')
-    parser.add_argument('--deptest', action='store_true', default=True,
-                        help='For loading the \'protein_bilstm\' Model')
+    parser.add_argument('--l2', action='store_true', default=False,
+                        help='l2 regularizer')
+    parser.add_argument('--plot-freq', action='store_true', default=False,
+                        help='plot various frequencies')
+    parser.add_argument('--plot-div', action='store_true', default=False,
+                        help='plot diversity scores of train/test data')
+    parser.add_argument('--gen', action='store_true', default=False,
+                        help='generate novel sequences')
+    parser.add_argument('--deptest', action='store_true', default=False,
+                        help='test long-distance dependencies')
     
     args = parser.parse_args()
-    seq_train, train_labels, seq_test, test_labels = buildDatasets()
+    diversity, seq_train, train_labels, seq_test, test_labels = buildDatasets(args)
 
     if args.train_model:
-        model = keras.Sequential([
-            layers.Bidirectional(layers.LSTM(64, return_sequences=True), input_shape=(100,21)),
-            layers.BatchNormalization(),
-            layers.Dropout(0.2),
-            layers.Flatten(),
-            layers.Dense(256, activation='relu'),
-            layers.Dropout(0.2),
-            layers.Dense(21, activation='softmax'),
-        ])
+        if args.l2:
+            l2 = reg.l2(1e-3)
+        else:
+            l2 = None
 
+        model = buildModel(l2)
         model.summary()
+
         model.compile(loss=tf.losses.SparseCategoricalCrossentropy(),
-            optimizer=tf.optimizers.SGD(learning_rate=3e-2),
-            metrics=["accuracy"])    
+            optimizer=tf.optimizers.Adam(learning_rate=1e-3, epsilon=1e-8, decay=0.0),
+            #optimizer=tf.optimizers.SGD(learning_rate=1e-2),
+            metrics=["accuracy"])
+
         historyMod = model.fit(x=seq_train.numpy(),
             y=train_labels.numpy(), 
-            epochs=10, 
+            epochs=25, 
             batch_size=128, 
             validation_data=(seq_test.numpy(), test_labels.numpy()),
             shuffle=True)
@@ -118,9 +112,11 @@ def main():
     else:
         model: keras.Sequential = keras.models.load_model('protein_bilstm')
         if args.gen:
-            generateSequence(model)
+            seqDict = testGeneration(model)
+            plotGenerated(seqDict)
         if args.deptest:
             dependencyTest(model, seq_test, test_labels)
+            #plotDependencies()
 
 if __name__ == '__main__':
     main()
